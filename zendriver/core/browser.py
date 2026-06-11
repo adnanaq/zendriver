@@ -79,6 +79,7 @@ class Browser:
         lang: str | None = None,
         host: str | None = None,
         port: int | None = None,
+        persona: Any | None = None,
         **kwargs: Any,
     ) -> Browser:
         """
@@ -96,6 +97,7 @@ class Browser:
                 lang=lang,
                 host=host,
                 port=port,
+                persona=persona,
                 **kwargs,
             )
         instance = cls(config)
@@ -433,7 +435,37 @@ class Browser:
             ]
             await self.connection.send(cdp.target.set_discover_targets(discover=True))
         await self.update_targets()
+        self._build_fingerprint()
         return self
+
+    def _build_fingerprint(self) -> None:
+        """Build Fingerprint from browser version info and apply seed pinning."""
+        if not self.config.persona or not self.info:
+            self._fingerprint = None
+            return
+
+        from .stealth import Fingerprint, Seed
+
+        persona = self.config.persona
+
+        # Seed pinning: persist seed in user_data_dir so the same profile
+        # always presents the same fingerprint across browser restarts.
+        if self.config.uses_custom_data_dir:
+            seed_file = pathlib.Path(self.config.user_data_dir) / ".zd_persona_seed"
+            if persona.seed is None:
+                if seed_file.exists():
+                    try:
+                        persona.seed = Seed.from_int(int(seed_file.read_text().strip()))
+                    except Exception:
+                        pass
+            if persona.seed is None:
+                persona.seed = Seed.random()
+                try:
+                    seed_file.write_text(str(persona.seed.value))
+                except Exception:
+                    pass
+
+        self._fingerprint = Fingerprint.from_browser_info(dict(self.info), persona)
 
     async def test_connection(self) -> bool:
         if not self._http:

@@ -48,6 +48,7 @@ class Config:
         user_agent: Optional[str] = None,
         disable_webrtc: Optional[bool] = True,
         disable_webgl: Optional[bool] = False,
+        persona: Optional[Any] = None,
         **kwargs: Any,
     ):
         """
@@ -99,6 +100,7 @@ class Config:
         self.expert = expert
         self.disable_webrtc = disable_webrtc
         self.disable_webgl = disable_webgl
+        self.persona = persona
         self._extensions: list[PathLike] = []
 
         # when using posix-ish operating system and running as root

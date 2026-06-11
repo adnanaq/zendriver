@@ -41,6 +41,7 @@ async def start(
     port: Optional[int] = None,
     expert: Optional[bool] = None,
     user_agent: Optional[str] = None,
+    persona: Optional[Any] = None,
     **kwargs: Any,
 ) -> Browser:
     """
@@ -89,6 +90,7 @@ async def start(
             port=port,
             expert=expert,
             user_agent=user_agent,
+            persona=persona,
             **kwargs,
         )
     from .browser import Browser

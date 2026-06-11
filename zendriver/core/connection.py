@@ -554,9 +554,11 @@ class Connection(metaclass=CantTouchThis):
         if self._owner:
             browser = self._owner
             if browser.config:
-                if browser.config.expert:
+                if browser.config.persona is not None:
+                    await self._prepare_stealth()
+                elif browser.config.expert:
                     await self._prepare_expert()
-                if browser.config.headless:
+                if browser.config.headless and browser.config.persona is None:
                     await self._prepare_headless()
         if not self.listener or not self.listener.running:
             self.listener = Listener(self)
@@ -669,6 +671,25 @@ class Connection(metaclass=CantTouchThis):
             self.manually_enabled_domains.remove(domain_mod)
         elif action == "enable" and domain_mod not in self.manually_enabled_domains:
             self.manually_enabled_domains.append(domain_mod)
+
+    async def _prepare_stealth(self) -> None:
+        if getattr(self, "_prep_stealth_done", None):
+            return
+        browser = self._owner
+        if not browser:
+            return
+        persona = browser.config.persona
+        fingerprint = getattr(browser, "_fingerprint", None)
+        if persona is None or fingerprint is None:
+            return
+        await self._send_oneshot(cdp.page.enable())
+        from .stealth_patches import bootstrap_script
+        script = bootstrap_script(persona, fingerprint)
+        await self._send_oneshot(cdp.page.add_script_to_evaluate_on_new_document(script))
+        # In stealth mode, UA strip is handled by the JS identity patch.
+        if browser.config.headless:
+            await self._prepare_headless()
+        setattr(self, "_prep_stealth_done", True)
 
     async def _prepare_headless(self) -> None:
         if getattr(self, "_prep_headless_done", None):
