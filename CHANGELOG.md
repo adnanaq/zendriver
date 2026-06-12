@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `Persona` / `Fingerprint` spoofing API: per-session canvas, audio, clientRects, and WebGL noise injection via CDP `addScriptToEvaluateOnNewDocument`. Canvas farbling uses content-derived seeding with uniform-neighborhood detection to avoid triggering proof-of-work canvas checks. @adnanaq
+
 ### Changed
 
 - Updated CDP models @nathanfallet

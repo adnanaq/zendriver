@@ -684,8 +684,11 @@ class Connection(metaclass=CantTouchThis):
             return
         await self._send_oneshot(cdp.page.enable())
         from .stealth_patches import bootstrap_script
+
         script = bootstrap_script(persona, fingerprint)
-        await self._send_oneshot(cdp.page.add_script_to_evaluate_on_new_document(script))
+        await self._send_oneshot(
+            cdp.page.add_script_to_evaluate_on_new_document(script)
+        )
         # In stealth mode, UA strip is handled by the JS identity patch.
         if browser.config.headless:
             await self._prepare_headless()

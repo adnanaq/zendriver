@@ -76,6 +76,7 @@ exclude = [
     "examples/wait_for_page.py",
     "examples/set_user_agent.py",
     "examples/expect_download.py",
+    "examples/verify_stealth.py",
 ]
 strict = true
 check_untyped_defs = true

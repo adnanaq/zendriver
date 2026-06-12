@@ -5,8 +5,9 @@ import random
 import re
 import socket
 import sys
-from dataclasses import dataclass, field, asdict
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from dataclasses import asdict, dataclass
+from typing import Any, ClassVar, Dict, List, Optional
+
 
 class Strategy(enum.Enum):
     NATIVE = "Native"
@@ -45,13 +46,16 @@ class Surface(enum.Enum):
     def resolve_strategy(self, requested: Optional[Strategy]) -> Strategy:
         if requested is None:
             return self.default_strategy()
-        
+
         # Validate strategy against surface kind
         kind = self.kind
         ok = (
             requested == Strategy.NATIVE
             or requested == Strategy.BLOCK
-            or (kind == SurfaceKind.NOISE and requested in (Strategy.SEEDED, Strategy.RANDOM))
+            or (
+                kind == SurfaceKind.NOISE
+                and requested in (Strategy.SEEDED, Strategy.RANDOM)
+            )
             or (kind == SurfaceKind.VALUE and requested == Strategy.VALUE)
             or (kind == SurfaceKind.POLICY and requested == Strategy.VALUE)
         )
@@ -59,6 +63,7 @@ class Surface(enum.Enum):
             return requested
         else:
             import logging
+
             logging.getLogger(__name__).warning(
                 f"Strategy {requested.name} not meaningful for surface {self.name}; using default {self.default_strategy().name}"
             )
@@ -127,8 +132,11 @@ def _get_machine_id() -> str:
                 pass
     elif sys.platform == "darwin":
         import subprocess
+
         try:
-            out = subprocess.check_output(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"])
+            out = subprocess.check_output(
+                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]
+            )
             for line in out.decode("utf-8").splitlines():
                 if "IOPlatformUUID" in line:
                     return line.strip()
@@ -137,7 +145,10 @@ def _get_machine_id() -> str:
     elif sys.platform == "win32":
         try:
             import winreg
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as key:
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography"
+            ) as key:
                 val, _ = winreg.QueryValueEx(key, "MachineGuid")
                 return str(val)
         except Exception:
@@ -208,9 +219,13 @@ class Persona:
         for field_name in self.__dataclass_fields__:
             val_self = getattr(self, field_name)
             val_over = getattr(over, field_name)
-            
+
             if val_over is not None:
-                if val_self is not None and hasattr(val_self, "overlay") and hasattr(val_over, "overlay"):
+                if (
+                    val_self is not None
+                    and hasattr(val_self, "overlay")
+                    and hasattr(val_over, "overlay")
+                ):
                     # Recursive overlay for spec fields
                     setattr(merged, field_name, val_self.overlay(val_over))
                 else:
@@ -219,7 +234,7 @@ class Persona:
                 setattr(merged, field_name, val_self)
         return merged
 
-    def apply_surface_override(self, surface: Surface, strategy: Strategy):
+    def apply_surface_override(self, surface: Surface, strategy: Strategy) -> None:
         if surface == Surface.CANVAS:
             if self.canvas is None:
                 self.canvas = SurfaceCfg()
@@ -260,7 +275,6 @@ class Persona:
         if cls._cached_system is not None:
             return cls._cached_system
         import os
-        import psutil
 
         plat_str = platform.system().lower()
         if "win" in plat_str:
@@ -271,8 +285,13 @@ class Persona:
             plat = Platform.LINUX_X86_64
 
         cpu_count = max(2, min(32, os.cpu_count() or 4))
-        total_bytes = psutil.virtual_memory().total
-        gb = max(4, min(8, int(total_bytes / (1024 ** 3))))
+        try:
+            import psutil
+
+            total_bytes = psutil.virtual_memory().total
+            gb = max(4, min(8, int(total_bytes / (1024**3))))
+        except Exception:
+            gb = 4
 
         cls._cached_system = cls(
             platform=plat,
@@ -331,6 +350,7 @@ def parse_persona(val: Any) -> Optional[Persona]:
     if isinstance(val, str):
         # Could be JSON
         import json
+
         try:
             val = json.loads(val)
         except Exception:
@@ -346,7 +366,7 @@ def parse_persona(val: Any) -> Optional[Persona]:
 def _persona_from_browserforge_dict(val: Dict[str, Any]) -> Persona:
     fp = val.get("fingerprint", val)
     p = Persona()
-    
+
     # 1. Navigator
     nav = fp.get("navigator", {})
     if "platform" in nav:
@@ -357,46 +377,44 @@ def _persona_from_browserforge_dict(val: Dict[str, Any]) -> Persona:
             p.platform = Platform.MAC_INTEL
         else:
             p.platform = Platform.LINUX_X86_64
-            
+
     if "deviceMemory" in nav:
         p.device_memory_gb = nav["deviceMemory"]
     if "hardwareConcurrency" in nav:
         p.hardware_concurrency = nav["hardwareConcurrency"]
     if "language" in nav:
         p.locale = nav["language"]
-        
+
     # 2. User Agent
-    ua_str = nav.get("userAgent") or fp.get("userAgent") or fp.get("headers", {}).get("User-Agent")
+    ua_str = (
+        nav.get("userAgent")
+        or fp.get("userAgent")
+        or fp.get("headers", {}).get("User-Agent")
+    )
     if ua_str:
         p.ua = UaSpec(ua_string=ua_str, platform=nav.get("platform"))
-        
+
     # 3. Video Card (WebGL)
     vc = fp.get("videoCard", {})
     vendor = vc.get("vendor")
     renderer = vc.get("renderer")
     if vendor or renderer:
         p.webgl = WebglSpec(
-            strategy=Strategy.VALUE,
-            unmasked_vendor=vendor,
-            unmasked_renderer=renderer
+            strategy=Strategy.VALUE, unmasked_vendor=vendor, unmasked_renderer=renderer
         )
-        
+
     # 4. Fonts
     fonts = fp.get("fonts")
     if fonts:
-        p.fonts = FontSpec(
-            strategy=Strategy.VALUE,
-            available=fonts
-        )
-        
+        p.fonts = FontSpec(strategy=Strategy.VALUE, available=fonts)
+
     # 5. Hardware (Battery)
     bat = fp.get("battery", {})
     if bat:
         level = bat.get("level") if isinstance(bat, dict) else bat
         if isinstance(level, (int, float)):
             p.hardware = HardwareSpec(
-                strategy=Strategy.VALUE,
-                battery_level=float(level)
+                strategy=Strategy.VALUE, battery_level=float(level)
             )
 
     return p
