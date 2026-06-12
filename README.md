@@ -24,6 +24,7 @@ Zendriver is a blazing fast, async-first, undetectable webscraping/web automatio
 - **Automatic cookie and profile management** - By default, uses fresh profile on each run, cleaning up on exit. Or, save and load cookies to a file to avoid repeating tedious login steps.
 - **Smart element lookup** - Find elements selector or text, including iframe content. This could also be used as wait condition for a element to appear, since it will retry for the duration of `timeout` until found. Single element lookup by text using `tab.find()` accepts a `best_match flag`, which will not naively return the first match, but will match candidates by closest matching text length.
 - **Easy debugging** - Descriptive `repr` for elements, which represents the element as HTML, makes debugging much easier.
+- **Fingerprint spoofing** - Per-session canvas, audio, and clientRects noise injection via a simple `Persona` API, making each browser instance harder to fingerprint across runs.
 
 ## Installation
 
@@ -56,6 +57,37 @@ if __name__ == "__main__":
 ```
 
 Check out the [Quickstart](https://zendriver.dev/quickstart/) for more information and examples.
+
+### Fingerprint spoofing
+
+Pass a `Persona` to `zd.start()` to enable per-session noise injection across canvas, audio, and clientRects surfaces:
+
+```python
+import asyncio
+
+import zendriver as zd
+from zendriver import Persona, Seed, Strategy, SurfaceCfg, WebglSpec
+
+
+async def main():
+    persona = Persona(
+        canvas=SurfaceCfg(strategy=Strategy.SEEDED),
+        audio=SurfaceCfg(strategy=Strategy.SEEDED),
+        client_rects=SurfaceCfg(strategy=Strategy.SEEDED),
+        webgl=WebglSpec(strategy=Strategy.NATIVE),
+        seed=Seed.from_int(42),  # or Seed.random() for a fresh seed each run
+    )
+    browser = await zd.start(persona=persona)
+    page = await browser.get("https://pixelscan.net")
+    await page.save_screenshot("result.png")
+    await browser.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Use `Strategy.SEEDED` to inject deterministic per-seed noise (same seed = same fingerprint across runs), or `Strategy.NATIVE` to leave a surface unmodified.
 
 ## Rationale for the fork
 
