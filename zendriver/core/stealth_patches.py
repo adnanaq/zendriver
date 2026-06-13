@@ -53,6 +53,18 @@ if TYPE_CHECKING:
 # function — the iframe's per-realm WeakSet wouldn't contain it, leaking the real
 # source. (Cross-origin iframes can't reach window.top and fall back to a local
 # registry — an inherent limit, but they also can't read main-realm functions.)
+#
+# NO-PROTOTYPE BUILDERS: a plain `function name(){}` carries a `.prototype` own
+# property, but native methods and native accessor getters do NOT — so a
+# fingerprinter testing `'prototype' in fn` distinguishes a patched function from
+# a genuine one (CreepJS's "Prototype" lie). __zdMethod builds the replacement as
+# a concise object method (`{[name](){}}`), which has no prototype, preserves
+# `this`, and carries the correct name; its `.length` is set to the native arity.
+# __zdGetter builds the replacement via getter syntax (`{get [name](){}}`), which
+# likewise has no prototype and is named "get <name>" exactly like a native
+# accessor. Both register the result for the toString facade. The real
+# implementation is passed as a closure (it keeps its prototype but is never
+# exposed — only the no-prototype wrapper is installed on the target object).
 # ---------------------------------------------------------------------------
 _NATIVE_SHIELD = """\
 (function(){
@@ -60,15 +72,33 @@ _NATIVE_SHIELD = """\
   var KEY=Symbol.for('zd.fns');
   var _fns=TOP[KEY]; if(!_fns){ try{ _fns=TOP[KEY]=new WeakSet(); }catch(e){ _fns=new WeakSet(); } }
   const _orig=Function.prototype.toString;
+  // Build the replacement as a concise object method so it has NO own `prototype`
+  // (a plain `function(){}` would — and a fingerprinter testing
+  // `'prototype' in Function.prototype.toString` would then flag the shield by the
+  // very check it exists to defeat). A concise method also yields name "toString",
+  // length 0, and own keys exactly [length,name] — matching the native built-in.
+  const _ts={ toString(){
+    return _fns.has(this)?'function '+(this.name||'')+'() { [native code] }':_orig.call(this);
+  } }.toString;
   Object.defineProperty(Function.prototype,'toString',{
-    value:function toString(){
-      return _fns.has(this)?'function '+(this.name||'')+'() { [native code] }':_orig.call(this);
-    },
-    writable:true,configurable:true,enumerable:false,
+    value:_ts,writable:true,configurable:true,enumerable:false,
   });
   _fns.add(Function.prototype.toString);
   window.__zdNative=function zdNative(fn){_fns.add(fn);return fn;};
+  window.__zdMethod=function zdMethod(name,len,impl){
+    var holder={ [name](){ return impl.apply(this,arguments); } };
+    var fn=holder[name];
+    try{ Object.defineProperty(fn,'length',{value:len,configurable:true}); }catch(e){}
+    _fns.add(fn); return fn;
+  };
+  window.__zdGetter=function zdGetter(name,impl){
+    var holder={ get [name](){ return impl.call(this); } };
+    var g=Object.getOwnPropertyDescriptor(holder,name).get;
+    _fns.add(g); return g;
+  };
   __zdNative(window.__zdNative);
+  __zdNative(window.__zdMethod);
+  __zdNative(window.__zdGetter);
 })();"""
 
 # ---------------------------------------------------------------------------
@@ -119,11 +149,11 @@ _CANVAS = """\
     }
   }
   const origGet = CanvasRenderingContext2D.prototype.getImageData;
-  CanvasRenderingContext2D.prototype.getImageData = __zdNative(function getImageData(...args) {
+  CanvasRenderingContext2D.prototype.getImageData = __zdMethod('getImageData', origGet.length, function (...args) {
     const img = origGet.apply(this, args); farble(img.data, img.width); return img;
   });
   const origURL = HTMLCanvasElement.prototype.toDataURL;
-  HTMLCanvasElement.prototype.toDataURL = __zdNative(function toDataURL(...args) {
+  HTMLCanvasElement.prototype.toDataURL = __zdMethod('toDataURL', origURL.length, function (...args) {
     const ctx = this.getContext('2d');
     if (ctx && this.width > 0 && this.height > 0) {
       const orig = origGet.call(ctx, 0, 0, this.width, this.height);
@@ -140,13 +170,13 @@ _AUDIO = """\
   if (typeof AnalyserNode === 'undefined') return;
   const rng = __zdRng(seed);
   const origFreq = AnalyserNode.prototype.getFloatFrequencyData;
-  AnalyserNode.prototype.getFloatFrequencyData = __zdNative(function getFloatFrequencyData(a) {
+  AnalyserNode.prototype.getFloatFrequencyData = __zdMethod('getFloatFrequencyData', origFreq.length, function (a) {
     origFreq.call(this, a);
     for (let i = 0; i < a.length; i++) a[i] += (rng() - 0.5) * 1e-4;
   });
   const origTime = AnalyserNode.prototype.getByteTimeDomainData;
   if (origTime) {
-    AnalyserNode.prototype.getByteTimeDomainData = __zdNative(function getByteTimeDomainData(a) {
+    AnalyserNode.prototype.getByteTimeDomainData = __zdMethod('getByteTimeDomainData', origTime.length, function (a) {
       origTime.call(this, a);
       for (let i = 0; i < a.length; i++)
         a[i] = Math.max(0, Math.min(255, a[i] + (rng() < 0.5 ? -1 : 1)));
@@ -165,12 +195,12 @@ _CLIENT_RECTS = """\
   const factor = 1 + (rng() - 0.5) * 2e-5;
   function n(v) { return v * factor; }
   const origR = Element.prototype.getBoundingClientRect;
-  Element.prototype.getBoundingClientRect = __zdNative(function getBoundingClientRect() {
+  Element.prototype.getBoundingClientRect = __zdMethod('getBoundingClientRect', origR.length, function () {
     const r = origR.call(this);
     return new DOMRect(n(r.x), n(r.y), n(r.width), n(r.height));
   });
   const origRs = Element.prototype.getClientRects;
-  Element.prototype.getClientRects = __zdNative(function getClientRects() {
+  Element.prototype.getClientRects = __zdMethod('getClientRects', origRs.length, function () {
     return Array.from(origRs.call(this)).map(r => new DOMRect(n(r.x), n(r.y), n(r.width), n(r.height)));
   });
 })(SEED);"""
@@ -199,7 +229,7 @@ _WEBGL_REFORMAT = """\
   function patch(p){
     if(!p) return;
     var o = p.getParameter;
-    p.getParameter = __zdNative(function getParameter(q){
+    p.getParameter = __zdMethod('getParameter', o.length, function(q){
       if(q === 0x9246) return reformat(o.call(this, q));
       return o.call(this, q);
     });
@@ -212,7 +242,7 @@ _WEBGL_REFORMAT = """\
 # WEBGL_VENDOR / WEBGL_RENDERER substituted with JSON strings.
 _WEBGL = """\
 (function(vendor,renderer){
-  function patch(p){const o=p.getParameter;p.getParameter=__zdNative(function getParameter(q){if(vendor&&q===0x9245)return vendor;if(renderer&&q===0x9246)return renderer;return o.call(this,q);});}
+  function patch(p){const o=p.getParameter;p.getParameter=__zdMethod('getParameter',o.length,function(q){if(vendor&&q===0x9245)return vendor;if(renderer&&q===0x9246)return renderer;return o.call(this,q);});}
   if(window.WebGLRenderingContext)patch(WebGLRenderingContext.prototype);
   if(window.WebGL2RenderingContext)patch(WebGL2RenderingContext.prototype);
 })(WEBGL_VENDOR,WEBGL_RENDERER);"""
@@ -244,7 +274,7 @@ _FONTS = """\
   }
   function h(s){let x=2166136261;for(let i=0;i<s.length;i++){x=Math.imul(x^s.charCodeAt(i),16777619)>>>0;}return x;}
   const orig=CanvasRenderingContext2D.prototype.measureText;
-  CanvasRenderingContext2D.prototype.measureText=__zdNative(function measureText(t){
+  CanvasRenderingContext2D.prototype.measureText=__zdMethod('measureText',orig.length,function(t){
     const m=orig.call(this,t);
     const f=fam(this.font);
     if(!f||GENERIC.has(f.toLowerCase())) return m;
@@ -261,7 +291,8 @@ _FONTS = """\
     return m;
   });
   if(document.fonts&&document.fonts.check){
-    document.fonts.check=__zdNative(function check(font,text){
+    const origCheck=document.fonts.check;
+    document.fonts.check=__zdMethod('check',origCheck.length,function(font,text){
       return SET.has(fam(font));
     });
   }
@@ -276,7 +307,7 @@ _FONTS = """\
       const localOnly = typeof source==='string' && /local\\(/.test(source) && !/url\\(/.test(source);
       if(localOnly){
         const f=fam(family);
-        ff.load=__zdNative(function load(){
+        ff.load=__zdMethod('load',RealFF.prototype.load.length,function(){
           if(SET.has(f)){ try{Object.defineProperty(ff,'status',{value:'loaded',configurable:true});}catch(e){} return Promise.resolve(ff); }
           return Promise.reject(new DOMException('A network error occurred.','NetworkError'));
         });
@@ -284,6 +315,12 @@ _FONTS = """\
       return ff;
     }
     FontFaceShim.prototype=RealFF.prototype;
+    // Match the native constructor's identity: name "FontFace" (not the internal
+    // shim name, which would leak via fn.name and the shielded toString) and
+    // length 2 (family, source — descriptors optional). The function keeps its
+    // own `prototype` because real constructors do.
+    try{Object.defineProperty(FontFaceShim,'name',{value:'FontFace',configurable:true});}catch(e){}
+    try{Object.defineProperty(FontFaceShim,'length',{value:RealFF.length,configurable:true});}catch(e){}
     try{ self.FontFace=__zdNative(FontFaceShim); }catch(e){}
   }
 })(FONT_ALLOW,SEED);"""
@@ -291,11 +328,11 @@ _FONTS = """\
 _HARDWARE = """\
 (function(battery,mediaDevices,voices){
   if(typeof battery==='number'&&navigator.getBattery)
-    navigator.getBattery=__zdNative(function getBattery(){return Promise.resolve({level:battery,charging:true,chargingTime:0,dischargingTime:Infinity,addEventListener(){},removeEventListener(){}});});
+    navigator.getBattery=__zdMethod('getBattery',navigator.getBattery.length,function(){return Promise.resolve({level:battery,charging:true,chargingTime:0,dischargingTime:Infinity,addEventListener(){},removeEventListener(){}});});
   if(typeof mediaDevices==='number'&&navigator.mediaDevices&&navigator.mediaDevices.enumerateDevices)
-    navigator.mediaDevices.enumerateDevices=__zdNative(function enumerateDevices(){return Promise.resolve(Array.from({length:mediaDevices},(_,i)=>({deviceId:'dev'+i,kind:'audioinput',label:'',groupId:'g'+i})));});
-  if(Array.isArray(voices)&&window.speechSynthesis)
-    speechSynthesis.getVoices=__zdNative(function getVoices(){return voices.map(n=>({name:n,lang:'en-US',default:false,localService:true,voiceURI:n}));});
+    navigator.mediaDevices.enumerateDevices=__zdMethod('enumerateDevices',navigator.mediaDevices.enumerateDevices.length,function(){return Promise.resolve(Array.from({length:mediaDevices},(_,i)=>({deviceId:'dev'+i,kind:'audioinput',label:'',groupId:'g'+i})));});
+  if(Array.isArray(voices)&&window.speechSynthesis&&speechSynthesis.getVoices)
+    speechSynthesis.getVoices=__zdMethod('getVoices',speechSynthesis.getVoices.length,function(){return voices.map(n=>({name:n,lang:'en-US',default:false,localService:true,voiceURI:n}));});
 })(HW_BATTERY,HW_MEDIA_DEVICES,HW_VOICES);"""
 
 _WEBRTC = """\
@@ -318,6 +355,12 @@ _WEBRTC = """\
     return pc;
   });
   window.RTCPeerConnection.prototype=RTC.prototype;
+  // Mirror the native constructor's own shape: length 0 (the native ctor reports
+  // 0 even though it accepts a config arg) and the static generateCertificate
+  // method (carried over by reference so it stays genuinely native). Without
+  // these, Object.getOwnPropertyNames / .length differ from a real RTCPeerConnection.
+  try{Object.defineProperty(window.RTCPeerConnection,'length',{value:RTC.length,configurable:true});}catch(e){}
+  try{if(RTC.generateCertificate)window.RTCPeerConnection.generateCertificate=RTC.generateCertificate;}catch(e){}
 })(WEBRTC_POLICY,WEBRTC_FAKE_IP);"""
 
 # ---------------------------------------------------------------------------
@@ -331,19 +374,23 @@ _WEBRTC = """\
 # --disable-blink-features=AutomationControlled makes it natively false; this is
 # a fallback that only acts (with a native-looking getter) if the flag is absent.
 _WEBDRIVER = """\
-try{ if(navigator.webdriver!==false){ Object.defineProperty(Navigator.prototype,'webdriver',{get:__zdNative(function(){return false;}),configurable:true,enumerable:true}); } }catch(e){}"""
+try{ if(navigator.webdriver!==false){ var _wdg=Object.getOwnPropertyDescriptor(Navigator.prototype,'webdriver'); _wdg=_wdg&&_wdg.get; Object.defineProperty(Navigator.prototype,'webdriver',{get:__zdGetter('webdriver',function(){if(_wdg)_wdg.call(this);return false;}),configurable:true,enumerable:true}); } }catch(e){}"""
 
 _CHROME_OBJECT = """\
 if(!window.chrome){window.chrome={app:{isInstalled:false,getDetails:function(){return null;},getIsInstalled:function(){return false;},runningState:function(){return 'cannot_run';}},runtime:{},loadTimes:function(){return null;},csi:function(){return null;}};}"""
 
 _PERMISSIONS = """\
-try{const _pq=window.Permissions&&Permissions.prototype.query;if(_pq){Permissions.prototype.query=__zdNative(function query(p){return p.name==='notifications'?Promise.resolve({state:'default',onchange:null}):_pq.call(this,p);});}}catch(e){}"""
+try{const _pq=window.Permissions&&Permissions.prototype.query;if(_pq){Permissions.prototype.query=__zdMethod('query',_pq.length,function(p){return p.name==='notifications'?Promise.resolve({state:'default',onchange:null}):_pq.call(this,p);});}}catch(e){}"""
 
 _NAVIGATOR_PROPS = """\
 (function(){
   function _isNative(fn){return typeof fn==='function'&&fn.toString().includes('[native code]');}
   function _nativeVal(pd){if(!pd||!_isNative(pd.get))return undefined;try{return pd.get.call(navigator);}catch(e){return undefined;}}
-  function _defProp(key,val){Object.defineProperty(Navigator.prototype,key,{get:__zdNative(function(){return val;}),configurable:true,enumerable:true});}
+  // Delegate the receiver brand-check to the captured native getter: calling it
+  // first reproduces native "Illegal invocation" TypeError on a wrong receiver
+  // (e.g. Navigator.prototype.platform), which detectors probe for; on a real
+  // navigator instance it succeeds and we return the spoofed value instead.
+  function _defProp(key,val){var ng=Object.getOwnPropertyDescriptor(Navigator.prototype,key);ng=ng&&ng.get;Object.defineProperty(Navigator.prototype,key,{get:__zdGetter(key,function(){if(ng)ng.call(this);return val;}),configurable:true,enumerable:true});}
   const _plat=_nativeVal(Object.getOwnPropertyDescriptor(Navigator.prototype,'platform'));
   const _hw=_nativeVal(Object.getOwnPropertyDescriptor(Navigator.prototype,'hardwareConcurrency'));
   const _dm=_nativeVal(Object.getOwnPropertyDescriptor(Navigator.prototype,'deviceMemory'));
@@ -366,13 +413,13 @@ _NAVIGATOR_PROPS = """\
 # tell does not fire either. SCREEN_* tokens substituted with integers/float.
 _SCREEN = """\
 (function(){
-  function dp(k,v){try{Object.defineProperty(screen,k,{get:__zdNative(function(){return v;}),configurable:true});}catch(e){}}
+  function dp(k,v){try{Object.defineProperty(screen,k,{get:__zdGetter(k,function(){return v;}),configurable:true});}catch(e){}}
   if(typeof screen!=='undefined'){
     dp('width',SCREEN_W); dp('height',SCREEN_H);
     dp('availWidth',SCREEN_AW); dp('availHeight',SCREEN_AH);
     dp('colorDepth',SCREEN_CD); dp('pixelDepth',SCREEN_PD);
   }
-  try{Object.defineProperty(window,'devicePixelRatio',{get:__zdNative(function(){return SCREEN_DPR;}),configurable:true});}catch(e){}
+  try{Object.defineProperty(window,'devicePixelRatio',{get:__zdGetter('devicePixelRatio',function(){return SCREEN_DPR;}),configurable:true});}catch(e){}
 })();"""
 
 # Fill in desktop-Chrome APIs that headless omits (CreepJS headless tells).
@@ -381,12 +428,18 @@ _SCREEN = """\
 # NOT added — desktop Chrome lacks it too; adding it would look mobile.)
 _HEADLESS_HINTS = """\
 (function(){
-  try{ if(!('share' in Navigator.prototype)) Navigator.prototype.share=__zdNative(function share(){return Promise.resolve();}); }catch(e){}
-  try{ if(!('canShare' in Navigator.prototype)) Navigator.prototype.canShare=__zdNative(function canShare(){return true;}); }catch(e){}
+  try{ if(!('share' in Navigator.prototype)) Navigator.prototype.share=__zdMethod('share',0,function(){return Promise.resolve();}); }catch(e){}
+  try{ if(!('canShare' in Navigator.prototype)) Navigator.prototype.canShare=__zdMethod('canShare',0,function(){return true;}); }catch(e){}
   try{
     if(navigator.connection){
       var cp=Object.getPrototypeOf(navigator.connection);
-      if(!('downlinkMax' in cp)) Object.defineProperty(cp,'downlinkMax',{get:__zdNative(function(){return Infinity;}),configurable:true,enumerable:true});
+      if(!('downlinkMax' in cp)){
+        // downlinkMax has no native getter to delegate to (we are adding it), so
+        // borrow a sibling native getter (downlink) for the receiver brand-check
+        // — it throws the same "Illegal invocation" TypeError on a wrong receiver.
+        var _dl=Object.getOwnPropertyDescriptor(cp,'downlink'); _dl=_dl&&_dl.get;
+        Object.defineProperty(cp,'downlinkMax',{get:__zdGetter('downlinkMax',function(){if(_dl)_dl.call(this);return Infinity;}),configurable:true,enumerable:true});
+      }
     }
   }catch(e){}
 })();"""
@@ -413,11 +466,30 @@ _IDENTITY_BODY = "\n".join(
 # Token substitution: WORKER_PLATFORM / WORKER_HC / WORKER_DM / WORKER_LANGS.
 _WORKER = """\
 (function zdWorker(){
-  function dp(o,k,v){try{Object.defineProperty(o,k,{get:function(){return v;},configurable:true,enumerable:true});}catch(e){}}
   // Only patch navigator inside a worker — the page's navigator is already
   // patched (native-shielded) by the identity body; re-patching there would
   // replace a native-looking getter with a plain one.
   if (typeof document === 'undefined' && typeof navigator !== 'undefined') {
+    // Worker scope has no page-level shield, so install a local one (sharing the
+    // same Symbol.for('zd.fns') WeakSet convention). Without it the patched
+    // getters/methods would leak their JS source via toString and carry a
+    // prototype — both detectable. The shield's toString replacement is itself a
+    // no-prototype concise method, matching the native built-in.
+    var _fns; try{ var KEY=Symbol.for('zd.fns'); _fns=self[KEY]||(self[KEY]=new WeakSet()); }catch(e){ _fns=new WeakSet(); }
+    if(!_fns.has(Function.prototype.toString)){
+      try{
+        var _orig=Function.prototype.toString;
+        var _ts={ toString(){ return _fns.has(this)?'function '+(this.name||'')+'() { [native code] }':_orig.call(this); } }.toString;
+        Object.defineProperty(Function.prototype,'toString',{value:_ts,writable:true,configurable:true,enumerable:false});
+        _fns.add(_ts);
+      }catch(e){}
+    }
+    // No-prototype getter (named "get <k>") whose receiver brand-check is
+    // delegated to the captured native getter, so an illegal invocation throws
+    // the native TypeError; and a no-prototype concise method with native arity.
+    function gett(name,impl){ var h={ get [name](){ return impl.call(this); } }; var g=Object.getOwnPropertyDescriptor(h,name).get; _fns.add(g); return g; }
+    function meth(name,len,impl){ var h={ [name](){ return impl.apply(this,arguments); } }; var f=h[name]; try{Object.defineProperty(f,'length',{value:len,configurable:true});}catch(e){} _fns.add(f); return f; }
+    function dp(o,k,v){ try{ var ng=Object.getOwnPropertyDescriptor(o,k); ng=ng&&ng.get; Object.defineProperty(o,k,{get:gett(k,function(){ if(ng)ng.call(this); return v; }),configurable:true,enumerable:true}); }catch(e){} }
     var p = Object.getPrototypeOf(navigator);
     dp(p,'platform',WORKER_PLATFORM);
     dp(p,'hardwareConcurrency',WORKER_HC);
@@ -428,7 +500,7 @@ _WORKER = """\
     var WGOS=WORKER_REFORMAT_OS;
     if(WGOS){
       var rf=function(real){ if(!real) return real; var m=real.match(/^ANGLE \\(([^,]+), (.+), ([^,)]+)\\)$/); if(!m) return real; var vendor=m[1],backend=m[2],model=backend; var inner=backend.match(/^(?:Vulkan|OpenGL)[^(]*\\((.+)\\)$/); if(inner) model=inner[1]; model=model.replace(/^(\\S+)\\s+\\1\\b/,'$1').replace(/\\bMesa\\s+/,''); if(WGOS==='windows') return 'ANGLE ('+vendor+', '+model+' Direct3D11 vs_5_0 ps_5_0, D3D11)'; if(WGOS==='macos') return 'ANGLE ('+vendor+', ANGLE Metal Renderer: '+model+', Unspecified Version)'; return real; };
-      var wgp=function(pr){ if(!pr) return; var o=pr.getParameter; pr.getParameter=function(q){ if(q===0x9246) return rf(o.call(this,q)); return o.call(this,q); }; };
+      var wgp=function(pr){ if(!pr) return; var o=pr.getParameter; pr.getParameter=meth('getParameter',o.length,function(q){ if(q===0x9246) return rf(o.call(this,q)); return o.call(this,q); }); };
       if(typeof WebGLRenderingContext!=='undefined') wgp(WebGLRenderingContext.prototype);
       if(typeof WebGL2RenderingContext!=='undefined') wgp(WebGL2RenderingContext.prototype);
     }
@@ -558,8 +630,24 @@ def _push_webrtc(parts: list[str], spec: WebrtcSpec | None) -> None:
 # worker's WorkerNavigator and its native userAgentData. Token substitution below.
 _SW_INJECT = """\
 (function(){
+  // Same native-shield + no-prototype builders as the page/worker patches, so the
+  // service-worker overrides report "[native code]", carry no prototype, and throw
+  // the native TypeError on an illegal getter invocation (brand-check delegated to
+  // the captured native getter).
+  var _fns; try{ var KEY=Symbol.for('zd.fns'); _fns=self[KEY]||(self[KEY]=new WeakSet()); }catch(e){ _fns=new WeakSet(); }
+  if(!_fns.has(Function.prototype.toString)){
+    try{
+      var _orig=Function.prototype.toString;
+      var _ts={ toString(){ return _fns.has(this)?'function '+(this.name||'')+'() { [native code] }':_orig.call(this); } }.toString;
+      Object.defineProperty(Function.prototype,'toString',{value:_ts,writable:true,configurable:true,enumerable:false});
+      _fns.add(_ts);
+    }catch(e){}
+  }
+  function gett(name,impl){ var h={ get [name](){ return impl.call(this); } }; var g=Object.getOwnPropertyDescriptor(h,name).get; _fns.add(g); return g; }
+  function meth(name,len,impl){ var h={ [name](){ return impl.apply(this,arguments); } }; var f=h[name]; try{Object.defineProperty(f,'length',{value:len,configurable:true});}catch(e){} _fns.add(f); return f; }
+  function dpo(o,k,v){ try{ var ng=Object.getOwnPropertyDescriptor(o,k); ng=ng&&ng.get; Object.defineProperty(o,k,{get:gett(k,function(){ if(ng)ng.call(this); return v; }),configurable:true,enumerable:true}); }catch(e){} }
   var p = Object.getPrototypeOf(navigator);
-  function dp(k,v){try{Object.defineProperty(p,k,{get:function(){return v;},configurable:true,enumerable:true});}catch(e){}}
+  function dp(k,v){ dpo(p,k,v); }
   dp('platform',SW_PLATFORM);
   dp('hardwareConcurrency',SW_HC);
   dp('deviceMemory',SW_DM);
@@ -570,15 +658,15 @@ _SW_INJECT = """\
     var uad = navigator.userAgentData;
     if (uad) {
       var up = Object.getPrototypeOf(uad);
-      Object.defineProperty(up,'platform',{get:function(){return SW_CH_PLATFORM;},configurable:true});
+      dpo(up,'platform',SW_CH_PLATFORM);
       var he = up.getHighEntropyValues;
-      up.getHighEntropyValues = function(h){return he.call(this,h).then(function(v){v.platform=SW_CH_PLATFORM;v.platformVersion=SW_CH_VERSION;return v;});};
+      up.getHighEntropyValues = meth('getHighEntropyValues',he.length,function(h){return he.call(this,h).then(function(v){v.platform=SW_CH_PLATFORM;v.platformVersion=SW_CH_VERSION;return v;});});
     }
   }catch(e){}
   var WGOS=SW_REFORMAT_OS;
   if(WGOS){
     var rf=function(real){ if(!real) return real; var m=real.match(/^ANGLE \\(([^,]+), (.+), ([^,)]+)\\)$/); if(!m) return real; var vendor=m[1],backend=m[2],model=backend; var inner=backend.match(/^(?:Vulkan|OpenGL)[^(]*\\((.+)\\)$/); if(inner) model=inner[1]; model=model.replace(/^(\\S+)\\s+\\1\\b/,'$1').replace(/\\bMesa\\s+/,''); if(WGOS==='windows') return 'ANGLE ('+vendor+', '+model+' Direct3D11 vs_5_0 ps_5_0, D3D11)'; if(WGOS==='macos') return 'ANGLE ('+vendor+', ANGLE Metal Renderer: '+model+', Unspecified Version)'; return real; };
-    var wgp=function(pr){ if(!pr) return; var o=pr.getParameter; pr.getParameter=function(q){ if(q===0x9246) return rf(o.call(this,q)); return o.call(this,q); }; };
+    var wgp=function(pr){ if(!pr) return; var o=pr.getParameter; pr.getParameter=meth('getParameter',o.length,function(q){ if(q===0x9246) return rf(o.call(this,q)); return o.call(this,q); }); };
     if(typeof WebGLRenderingContext!=='undefined') wgp(WebGLRenderingContext.prototype);
     if(typeof WebGL2RenderingContext!=='undefined') wgp(WebGL2RenderingContext.prototype);
   }
