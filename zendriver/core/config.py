@@ -31,6 +31,9 @@ class Config:
     Config object
     """
 
+    # Declared so type checkers resolve attribute access (set in __init__).
+    persona: "Optional[Any]"
+
     def __init__(
         self,
         user_data_dir: Optional[PathLike] = AUTO,
@@ -227,6 +230,23 @@ class Config:
             ]
         if self.disable_webgl:
             args += ["--disable-webgl", "--disable-webgl2"]
+
+        # When spoofing, make navigator.webdriver natively false (real Chrome
+        # value) in every context including workers, instead of deleting it in JS
+        # (CreepJS flags `webdriver === undefined` as automation).
+        if self.persona is not None:
+            if "--disable-blink-features=AutomationControlled" not in args:
+                args.append("--disable-blink-features=AutomationControlled")
+
+        # Note on WebGL realism: headless Chrome with no usable GPU falls back to
+        # the software SwiftShader renderer, whose renderer string is an automation
+        # tell. A real GPU can be exposed with an explicit ANGLE backend, e.g.
+        # browser_args=["--use-angle=vulkan"] (or "gl-egl"). This is intentionally
+        # NOT forced by default: pinning a backend the host's driver doesn't support
+        # breaks WebGL entirely (a worse, more obvious tell than SwiftShader), and a
+        # GPU-accelerated 2D canvas is non-deterministic, which would defeat the
+        # seeded canvas farble. Callers on capable hardware can opt in; if they do
+        # and also use the seeded canvas surface, add "--disable-accelerated-2d-canvas".
 
         return args
 

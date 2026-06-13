@@ -2,7 +2,6 @@ import enum
 import hashlib
 import platform
 import random
-import re
 import socket
 import sys
 from dataclasses import asdict, dataclass
@@ -212,11 +211,18 @@ class Persona:
     webrtc: Optional[WebrtcSpec] = None
     hardware: Optional[HardwareSpec] = None
     seed: Optional[Seed] = None
+    screen: Optional[Any] = None  # ScreenSpec override (from fingerprints.profile)
+    client_hints: Optional[Any] = None  # ClientHints override (from fingerprints.profile)
 
     def overlay(self, over: "Persona") -> "Persona":
         # Perform field-wise overlay (over overrides self)
         merged = Persona()
         for field_name in self.__dataclass_fields__:
+            # __dataclass_fields__ also lists ClassVars (e.g. the _cached_system
+            # cache). Skip private/cache fields — overlaying them would recurse
+            # (the cache holds a Persona, which itself has .overlay).
+            if field_name.startswith("_"):
+                continue
             val_self = getattr(self, field_name)
             val_over = getattr(over, field_name)
 
@@ -269,6 +275,30 @@ class Persona:
         if plat is None:
             plat = Persona.system().platform or Platform.LINUX_X86_64
         return plat.js_string()
+
+    @classmethod
+    def sample(
+        cls,
+        os: str = "windows",
+        seed: Optional[int] = None,
+        chrome_major: Optional[int] = None,
+    ) -> "Persona":
+        """Intent helper: request a coherent profile for a target OS.
+
+        The resolver (fingerprints.resolve) fills the rest from the live browser
+        + pool. ``chrome_major`` is accepted for forward-compatibility with pool
+        filtering and is currently unused (the resolver reads the real version
+        from the live browser).
+        """
+        plat = {
+            "windows": Platform.WIN32,
+            "macos": Platform.MAC_INTEL,
+            "linux": Platform.LINUX_X86_64,
+        }.get(os.lower(), Platform.LINUX_X86_64)
+        return cls(
+            platform=plat,
+            seed=Seed.from_int(seed) if seed is not None else None,
+        )
 
     @classmethod
     def system(cls) -> "Persona":
@@ -417,51 +447,26 @@ def _persona_from_browserforge_dict(val: Dict[str, Any]) -> Persona:
                 strategy=Strategy.VALUE, battery_level=float(level)
             )
 
+    # 6. Screen
+    scr = fp.get("screen")
+    if isinstance(scr, dict) and "width" in scr and "height" in scr:
+        from .fingerprints.profile import ScreenSpec
+
+        p.screen = ScreenSpec(
+            width=int(scr["width"]),
+            height=int(scr["height"]),
+            avail_width=int(scr.get("availWidth", scr["width"])),
+            avail_height=int(scr.get("availHeight", scr["height"])),
+            color_depth=int(scr.get("colorDepth", 24)),
+            pixel_depth=int(scr.get("pixelDepth", 24)),
+            device_pixel_ratio=float(scr.get("devicePixelRatio", 1.0)),
+        )
+
+    # 7. Timezone
+    tz = fp.get("timezone") or val.get("timezone")
+    if isinstance(tz, str):
+        p.timezone = tz
+
     return p
 
 
-@dataclass
-class Fingerprint:
-    """Real Chrome browser identity — built from the /json/version HTTP endpoint."""
-
-    chrome_version: str
-    chrome_major: int
-    ua_string: str
-    platform: Platform
-    cpu_count: int
-    memory_gb: int
-    locale: Optional[str] = None
-
-    @property
-    def platform_version(self) -> str:
-        if self.platform == Platform.WIN32:
-            return "15.0.0"
-        if self.platform == Platform.MAC_INTEL:
-            return "10_15_7"
-        return "6.0.0"
-
-    @classmethod
-    def from_browser_info(cls, info: Dict[str, Any], persona: Persona) -> "Fingerprint":
-        """Build from browser.info dict (already fetched at startup) + persona overrides."""
-        m = re.search(r"Chrome/(\d+)\.([\d.]+)", info.get("Browser", ""))
-        if m:
-            chrome_major = int(m.group(1))
-            chrome_version = f"{m.group(1)}.{m.group(2)}"
-        else:
-            chrome_major, chrome_version = 120, "120.0.0.0"
-
-        ua_string = info.get("User-Agent", "").replace("Headless", "")
-        sys_p = Persona.system()
-        plat = persona.platform or sys_p.platform or Platform.LINUX_X86_64
-        cpu = persona.hardware_concurrency or sys_p.hardware_concurrency or 4
-        mem = persona.device_memory_gb or sys_p.device_memory_gb or 4
-
-        return cls(
-            chrome_version=chrome_version,
-            chrome_major=chrome_major,
-            ua_string=ua_string,
-            platform=plat,
-            cpu_count=cpu,
-            memory_gb=mem,
-            locale=persona.locale,
-        )

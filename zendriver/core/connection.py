@@ -679,19 +679,69 @@ class Connection(metaclass=CantTouchThis):
         if not browser:
             return
         persona = browser.config.persona
-        fingerprint = getattr(browser, "_fingerprint", None)
-        if persona is None or fingerprint is None:
+        profile = getattr(browser, "_fingerprint", None)
+        if persona is None or profile is None:
             return
         await self._send_oneshot(cdp.page.enable())
         from .stealth_patches import bootstrap_script
 
-        script = bootstrap_script(persona, fingerprint)
+        script = bootstrap_script(profile)
         await self._send_oneshot(
             cdp.page.add_script_to_evaluate_on_new_document(script)
         )
-        # In stealth mode, UA strip is handled by the JS identity patch.
-        if browser.config.headless:
-            await self._prepare_headless()
+
+        # Apply the identity at the CDP layer: this makes navigator.userAgent and
+        # the *native* navigator.userAgentData object coherent, and means the
+        # headless "HeadlessChrome" token never reaches the page (the profile UA
+        # string carries the real version with no Headless marker). The metadata
+        # MUST be supplied — overriding the UA string without it makes Chrome
+        # blank out client hints entirely.
+        ua_ch = profile.ua_ch
+        meta = cdp.emulation.UserAgentMetadata(
+            brands=[
+                cdp.emulation.UserAgentBrandVersion(brand=b.brand, version=b.version)
+                for b in ua_ch.brands
+            ],
+            full_version_list=[
+                cdp.emulation.UserAgentBrandVersion(brand=b.brand, version=b.version)
+                for b in ua_ch.full_version_list
+            ],
+            platform=ua_ch.platform,
+            platform_version=ua_ch.platform_version,
+            architecture=ua_ch.architecture,
+            model=ua_ch.model,
+            mobile=ua_ch.mobile,
+            bitness=ua_ch.bitness,
+            wow64=ua_ch.wow64,
+            full_version=ua_ch.full_version or None,
+            form_factors=ua_ch.form_factors or None,
+        )
+        languages = profile.navigator.languages or ["en-US"]
+        accept_language = ",".join(
+            lang if i == 0 else f"{lang};q={max(0.1, 1 - i * 0.1):.1f}"
+            for i, lang in enumerate(languages)
+        )
+        await self._send_oneshot(
+            cdp.network.set_user_agent_override(
+                user_agent=profile.browser.ua_string,
+                accept_language=accept_language,
+                user_agent_metadata=meta,
+            )
+        )
+
+        # Timezone: override only when impersonating a different OS or when the
+        # persona explicitly requests one — otherwise keep the host's real zone.
+        from .stealth import Persona as _Persona
+
+        cross_os = profile.navigator.platform != _Persona.system().platform
+        if (cross_os or persona.timezone) and profile.timezone:
+            try:
+                await self._send_oneshot(
+                    cdp.emulation.set_timezone_override(profile.timezone)
+                )
+            except Exception:
+                pass
+
         setattr(self, "_prep_stealth_done", True)
 
     async def _prepare_headless(self) -> None:

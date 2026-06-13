@@ -4,6 +4,7 @@ import asyncio
 import copy
 import http
 import http.cookiejar
+import itertools
 import json
 import logging
 import pathlib
@@ -436,15 +437,74 @@ class Browser:
             await self.connection.send(cdp.target.set_discover_targets(discover=True))
         await self.update_targets()
         self._build_fingerprint()
+        await self._setup_worker_stealth()
         return self
 
+    async def _setup_worker_stealth(self) -> None:
+        """Inject the identity patch into worker targets (esp. service workers).
+
+        The page-level bootstrap and the Worker-constructor shim cannot reach
+        service workers (they load from a real same-origin URL). Browser-level
+        Target.setAutoAttach catches every worker target; we inject the patch via
+        a session-routed Runtime.evaluate before the worker runs, then resume it.
+        """
+        profile = getattr(self, "_fingerprint", None)
+        if not self.config.persona or profile is None or not self.connection:
+            return
+        from .stealth_patches import service_worker_inject_script
+
+        patch = service_worker_inject_script(profile)
+        conn = self.connection
+        counter = itertools.count(2_000_000)
+
+        async def on_attached(ev: cdp.target.AttachedToTarget) -> None:
+            # Inject into worker targets; ALWAYS resume any target paused for the
+            # debugger so non-worker targets (frames, popups) never hang.
+            try:
+                sid = str(ev.session_id)
+                if ev.target_info.type_ in ("service_worker", "worker", "shared_worker"):
+                    await conn.websocket.send(
+                        json.dumps(
+                            {
+                                "id": next(counter),
+                                "method": "Runtime.evaluate",
+                                "params": {"expression": patch, "awaitPromise": False},
+                                "sessionId": sid,
+                            }
+                        )
+                    )
+                if getattr(ev, "waiting_for_debugger", False):
+                    await conn.websocket.send(
+                        json.dumps(
+                            {
+                                "id": next(counter),
+                                "method": "Runtime.runIfWaitingForDebugger",
+                                "params": {},
+                                "sessionId": sid,
+                            }
+                        )
+                    )
+            except Exception:
+                pass
+
+        conn.add_handler(cdp.target.AttachedToTarget, on_attached)
+        try:
+            await conn.send(
+                cdp.target.set_auto_attach(
+                    auto_attach=True, wait_for_debugger_on_start=True, flatten=True
+                )
+            )
+        except Exception:
+            pass
+
     def _build_fingerprint(self) -> None:
-        """Build Fingerprint from browser version info and apply seed pinning."""
+        """Resolve a coherent ResolvedProfile from persona + live browser info; pin the seed."""
         if not self.config.persona or not self.info:
             self._fingerprint = None
             return
 
-        from .stealth import Fingerprint, Seed
+        from .stealth import Seed
+        from .fingerprints.resolve import resolve_profile
 
         persona = self.config.persona
 
@@ -452,12 +512,11 @@ class Browser:
         # always presents the same fingerprint across browser restarts.
         if self.config.uses_custom_data_dir:
             seed_file = pathlib.Path(self.config.user_data_dir) / ".zd_persona_seed"
-            if persona.seed is None:
-                if seed_file.exists():
-                    try:
-                        persona.seed = Seed.from_int(int(seed_file.read_text().strip()))
-                    except Exception:
-                        pass
+            if persona.seed is None and seed_file.exists():
+                try:
+                    persona.seed = Seed.from_int(int(seed_file.read_text().strip()))
+                except Exception:
+                    pass
             if persona.seed is None:
                 persona.seed = Seed.random()
                 try:
@@ -465,7 +524,7 @@ class Browser:
                 except Exception:
                     pass
 
-        self._fingerprint = Fingerprint.from_browser_info(dict(self.info), persona)
+        self._fingerprint = resolve_profile(persona, dict(self.info))
 
     async def test_connection(self) -> bool:
         if not self._http:

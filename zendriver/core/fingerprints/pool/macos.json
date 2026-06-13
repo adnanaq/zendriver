@@ -1,0 +1,33 @@
+[
+  {
+    "os": "macos",
+    "platform": "MacIntel",
+    "ch_platform": "macOS",
+    "platform_version": "14.5.0",
+    "architecture": "arm",
+    "bitness": "64",
+    "ua_template": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36",
+    "webgl_vendor": "Google Inc. (Apple)",
+    "webgl_renderer": "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+    "fonts": [
+      "American Typewriter", "Andale Mono", "Arial", "Arial Black", "Avenir",
+      "Avenir Next", "Baskerville", "Big Caslon", "Bodoni 72", "Bradley Hand",
+      "Brush Script MT", "Chalkboard", "Chalkduster", "Cochin", "Comic Sans MS",
+      "Copperplate", "Courier", "Courier New", "Didot", "Futura", "Geneva",
+      "Georgia", "Gill Sans", "Helvetica", "Helvetica Neue", "Herculanum",
+      "Hoefler Text", "Impact", "Lucida Grande", "Luminari", "Marker Felt",
+      "Menlo", "Monaco", "Noteworthy", "Optima", "Palatino", "Papyrus",
+      "Phosphate", "Rockwell", "Savoye LET", "SignPainter", "Skia",
+      "Snell Roundhand", "Tahoma", "Times", "Times New Roman", "Trattatello",
+      "Trebuchet MS", "Verdana", "Zapfino"
+    ],
+    "screens": [
+      {"width": 1512, "height": 982, "avail_width": 1512, "avail_height": 944, "device_pixel_ratio": 2.0},
+      {"width": 1728, "height": 1117, "avail_width": 1728, "avail_height": 1079, "device_pixel_ratio": 2.0}
+    ],
+    "hardware_concurrency": [8, 10, 12],
+    "device_memory_gb": [8, 16],
+    "timezone": "America/Los_Angeles",
+    "locale": "en-US"
+  }
+]

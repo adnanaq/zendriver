@@ -1,0 +1,26 @@
+[
+  {
+    "os": "linux",
+    "platform": "Linux x86_64",
+    "ch_platform": "Linux",
+    "platform_version": "6.5.0",
+    "architecture": "x86",
+    "bitness": "64",
+    "ua_template": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36",
+    "webgl_vendor": "Google Inc. (Intel)",
+    "webgl_renderer": "ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)",
+    "fonts": [
+      "DejaVu Sans", "DejaVu Sans Mono", "DejaVu Serif", "Liberation Mono",
+      "Liberation Sans", "Liberation Serif", "Ubuntu", "Ubuntu Mono",
+      "Ubuntu Condensed", "Noto Sans", "Noto Serif", "Noto Mono", "Noto Sans Mono",
+      "FreeSans", "FreeSerif", "FreeMono", "Cantarell", "DejaVu Math TeX Gyre"
+    ],
+    "screens": [
+      {"width": 1920, "height": 1080, "avail_width": 1920, "avail_height": 1053, "device_pixel_ratio": 1.0}
+    ],
+    "hardware_concurrency": [4, 8, 16],
+    "device_memory_gb": [8, 16],
+    "timezone": "America/New_York",
+    "locale": "en-US"
+  }
+]
