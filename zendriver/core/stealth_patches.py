@@ -45,10 +45,20 @@ if TYPE_CHECKING:
 # returns the standard "[native code]" string; all other functions fall through
 # to the original toString. The override itself is also registered so that
 # toString.toString() also looks native.
+#
+# CROSS-REALM: the registry WeakSet is stored on the TOP window under a shared
+# Symbol.for key, so every same-origin realm (the page + each iframe, which all
+# run this bootstrap) shares ONE registry. Without this, a fingerprinter calls a
+# fresh iframe's pristine Function.prototype.toString on a MAIN-realm patched
+# function — the iframe's per-realm WeakSet wouldn't contain it, leaking the real
+# source. (Cross-origin iframes can't reach window.top and fall back to a local
+# registry — an inherent limit, but they also can't read main-realm functions.)
 # ---------------------------------------------------------------------------
 _NATIVE_SHIELD = """\
 (function(){
-  const _fns=new WeakSet();
+  var TOP; try{ TOP=window.top; if(TOP===null) TOP=window; }catch(e){ TOP=window; }
+  var KEY=Symbol.for('zd.fns');
+  var _fns=TOP[KEY]; if(!_fns){ try{ _fns=TOP[KEY]=new WeakSet(); }catch(e){ _fns=new WeakSet(); } }
   const _orig=Function.prototype.toString;
   Object.defineProperty(Function.prototype,'toString',{
     value:function toString(){
@@ -413,6 +423,15 @@ _WORKER = """\
     dp(p,'hardwareConcurrency',WORKER_HC);
     dp(p,'deviceMemory',WORKER_DM);
     dp(p,'languages',WORKER_LANGS);
+    // Reformat OffscreenCanvas WebGL renderer to the target OS so it matches the
+    // main thread (else a main-vs-worker renderer mismatch is itself a tell).
+    var WGOS=WORKER_REFORMAT_OS;
+    if(WGOS){
+      var rf=function(real){ if(!real) return real; var m=real.match(/^ANGLE \\(([^,]+), (.+), ([^,)]+)\\)$/); if(!m) return real; var vendor=m[1],backend=m[2],model=backend; var inner=backend.match(/^(?:Vulkan|OpenGL)[^(]*\\((.+)\\)$/); if(inner) model=inner[1]; model=model.replace(/^(\\S+)\\s+\\1\\b/,'$1').replace(/\\bMesa\\s+/,''); if(WGOS==='windows') return 'ANGLE ('+vendor+', '+model+' Direct3D11 vs_5_0 ps_5_0, D3D11)'; if(WGOS==='macos') return 'ANGLE ('+vendor+', ANGLE Metal Renderer: '+model+', Unspecified Version)'; return real; };
+      var wgp=function(pr){ if(!pr) return; var o=pr.getParameter; pr.getParameter=function(q){ if(q===0x9246) return rf(o.call(this,q)); return o.call(this,q); }; };
+      if(typeof WebGLRenderingContext!=='undefined') wgp(WebGLRenderingContext.prototype);
+      if(typeof WebGL2RenderingContext!=='undefined') wgp(WebGL2RenderingContext.prototype);
+    }
   }
   var SELF='('+zdWorker.toString()+')();';
   var reg=(typeof __zdNative!=='undefined')?__zdNative:function(f){return f;};
@@ -556,7 +575,29 @@ _SW_INJECT = """\
       up.getHighEntropyValues = function(h){return he.call(this,h).then(function(v){v.platform=SW_CH_PLATFORM;v.platformVersion=SW_CH_VERSION;return v;});};
     }
   }catch(e){}
+  var WGOS=SW_REFORMAT_OS;
+  if(WGOS){
+    var rf=function(real){ if(!real) return real; var m=real.match(/^ANGLE \\(([^,]+), (.+), ([^,)]+)\\)$/); if(!m) return real; var vendor=m[1],backend=m[2],model=backend; var inner=backend.match(/^(?:Vulkan|OpenGL)[^(]*\\((.+)\\)$/); if(inner) model=inner[1]; model=model.replace(/^(\\S+)\\s+\\1\\b/,'$1').replace(/\\bMesa\\s+/,''); if(WGOS==='windows') return 'ANGLE ('+vendor+', '+model+' Direct3D11 vs_5_0 ps_5_0, D3D11)'; if(WGOS==='macos') return 'ANGLE ('+vendor+', ANGLE Metal Renderer: '+model+', Unspecified Version)'; return real; };
+    var wgp=function(pr){ if(!pr) return; var o=pr.getParameter; pr.getParameter=function(q){ if(q===0x9246) return rf(o.call(this,q)); return o.call(this,q); }; };
+    if(typeof WebGLRenderingContext!=='undefined') wgp(WebGLRenderingContext.prototype);
+    if(typeof WebGL2RenderingContext!=='undefined') wgp(WebGL2RenderingContext.prototype);
+  }
 })();"""
+
+
+def _reformat_os(profile: "ResolvedProfile") -> str:
+    """Target OS for cross-OS WebGL renderer reformatting, or '' when not applicable.
+
+    Only when WebGL is NATIVE (real GPU passes through) and the target OS differs
+    from the host OS — then both the main thread and workers rewrite the renderer
+    backend wording so they stay consistent (Windows/macOS only).
+    """
+    strat = Surface.WEBGL.resolve_strategy(profile.webgl.strategy if profile.webgl else None)
+    if strat != Strategy.NATIVE:
+        return ""
+    host_os = _OS_BY_PLATFORM.get(Persona.system().platform, "linux")
+    target_os = _OS_BY_PLATFORM.get(profile.navigator.platform, "linux")
+    return target_os if (target_os != host_os and target_os in ("windows", "macos")) else ""
 
 
 def service_worker_inject_script(profile: "ResolvedProfile") -> str:
@@ -574,6 +615,7 @@ def service_worker_inject_script(profile: "ResolvedProfile") -> str:
         .replace("SW_LANGS", json.dumps(languages))
         .replace("SW_CH_PLATFORM", json.dumps(profile.ua_ch.platform))
         .replace("SW_CH_VERSION", json.dumps(profile.ua_ch.platform_version))
+        .replace("SW_REFORMAT_OS", json.dumps(_reformat_os(profile)))
     )
 
 
@@ -599,11 +641,13 @@ def bootstrap_script(profile: "ResolvedProfile") -> str:
         }
     )
 
+    reformat_os = _reformat_os(profile)
     worker_js = (
         _WORKER.replace("WORKER_PLATFORM", json.dumps(nav.platform.js_string()))
         .replace("WORKER_HC", str(nav.hardware_concurrency))
         .replace("WORKER_DM", str(nav.device_memory_gb))
         .replace("WORKER_LANGS", json.dumps(languages))
+        .replace("WORKER_REFORMAT_OS", json.dumps(reformat_os))
     )
 
     scr = profile.screen
@@ -630,21 +674,12 @@ def bootstrap_script(profile: "ResolvedProfile") -> str:
     _push_noise(parts, Surface.CLIENT_RECTS, profile.client_rects, _CLIENT_RECTS, seed)
     _push_webgl(parts, profile.webgl)
 
-    # Cross-OS WebGL renderer reformatting: when impersonating a different OS and
-    # NOT substituting a fixed renderer string, rewrite the real GPU's backend
-    # wording to the target OS so it doesn't leak the host (e.g. "Vulkan" on Linux
-    # under a Windows UA). Only meaningful for a Windows/macOS target.
-    webgl_strat = Surface.WEBGL.resolve_strategy(
-        profile.webgl.strategy if profile.webgl else None
-    )
-    host_os = _OS_BY_PLATFORM.get(Persona.system().platform, "linux")
-    target_os = _OS_BY_PLATFORM.get(nav.platform, "linux")
-    if (
-        webgl_strat == Strategy.NATIVE
-        and target_os != host_os
-        and target_os in ("windows", "macos")
-    ):
-        parts.append(_WEBGL_REFORMAT.replace("WEBGL_OS", json.dumps(target_os)))
+    # Cross-OS WebGL renderer reformatting (main thread): rewrite the real GPU's
+    # backend wording to the target OS so it doesn't leak the host (e.g. "Vulkan"
+    # on Linux under a Windows UA). The worker patch above does the same in worker
+    # scope so the two stay consistent. _reformat_os() gates both.
+    if reformat_os:
+        parts.append(_WEBGL_REFORMAT.replace("WEBGL_OS", json.dumps(reformat_os)))
 
     _push_fonts(parts, profile.fonts, seed)
     _push_hardware(parts, profile.hardware)
