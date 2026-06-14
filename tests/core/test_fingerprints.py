@@ -112,6 +112,10 @@ def test_sample_builds_coherent_identity() -> None:
     # WebGL is carried but NATIVE by default (not emitted): a metadata-only
     # renderer spoof that doesn't match the real GPU is detectable.
     assert p.webgl.strategy == Strategy.NATIVE
+    # Client rects default to NATIVE too: per-rect noise reconstructs DOMRects from
+    # floats, breaking the geometric invariants a real browser guarantees (which
+    # fingerprinters flag as a lie), so consistent native rects are the safe default.
+    assert p.client_rects is not None and p.client_rects.strategy == Strategy.NATIVE
 
 
 def test_sample_varies_with_seed() -> None:
@@ -173,6 +177,26 @@ def test_assert_coherent_rejects_platform_ua_mismatch() -> None:
 def test_resolve_unparseable_version_falls_back() -> None:
     profile = resolve_profile(Persona(platform=Platform.WIN32, seed=Seed.from_int(5)), {"Browser": "garbage"})
     assert profile.browser.chrome_major == 126
+
+
+def test_resolve_timezone_modes() -> None:
+    """The three persona.timezone modes resolve as expected. (Timezone is a
+    property of the exit IP, not the OS — so the archetype zone is carried but only
+    *applied* when the persona asks; "auto" is resolved to the exit-IP zone at
+    browser startup, and arrives here as the literal sentinel.)"""
+    # None -> archetype zone retained (a concrete IANA zone, applied only if asked)
+    none_tz = resolve_profile(Persona(platform=Platform.WIN32, seed=Seed.from_int(5)), _INFO)
+    assert isinstance(none_tz.timezone, str) and "/" in none_tz.timezone
+    # Explicit IANA zone passes through unchanged
+    explicit = resolve_profile(
+        Persona(platform=Platform.WIN32, seed=Seed.from_int(5), timezone="Asia/Tokyo"), _INFO
+    )
+    assert explicit.timezone == "Asia/Tokyo"
+    # "auto" sentinel passes through (resolved to the exit-IP zone at startup)
+    auto = resolve_profile(
+        Persona(platform=Platform.WIN32, seed=Seed.from_int(5), timezone="auto"), _INFO
+    )
+    assert auto.timezone == "auto"
 
 
 # ---------------------------------------------------------------------------

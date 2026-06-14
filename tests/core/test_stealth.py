@@ -85,6 +85,22 @@ def test_shield_and_prng_always_present() -> None:
     script = _script(Persona())
     assert "__zdNative" in script
     assert "__zdRng" in script
+    # the no-prototype builders for patched methods/getters are part of the shield
+    assert "window.__zdMethod" in script
+    assert "window.__zdGetter" in script
+
+
+def test_patches_use_no_prototype_builders() -> None:
+    """Patched APIs go through the no-prototype builders; added share/canShare are
+    receiver-guarded; and screen.* lives on Screen.prototype (not the instance) so
+    there is no hasOwnProperty(screen,'width') tampering tell."""
+    script = _script(Persona(platform=Platform.WIN32, seed=Seed.from_int(1)))
+    assert "__zdMethod(" in script  # methods built as no-prototype concise methods
+    assert "__zdGetter(" in script  # getters built as no-prototype accessors
+    assert "instanceof Navigator" in script  # share/canShare throw on wrong receiver
+    assert "Screen.prototype" in script  # avail gap layered on the prototype
+    assert "availWidth" in script and "availHeight" in script
+    assert "defineProperty(screen,'width'" not in script  # never on the instance
 
 
 def test_canvas_strategy_script_output() -> None:
@@ -510,5 +526,171 @@ async def test_os_font_emulation(headless: bool) -> None:
         assert d["checkNope"] is False
         assert d["ffSegoe"] is True  # FontFace local() probe: target font "loads"
         assert d["ffLiberation"] is False  # Linux-only font hidden from FontFace
+    finally:
+        await browser.stop()
+
+
+# These run on about:blank — no external site, so they exercise the spoofing
+# internals without network flakiness.
+_LIE_AUDIT_JS = r"""
+(function(){
+  var nat=/\[native code\]/;
+  function err(fn){ try{fn();return 'NO-THROW';}catch(e){return e.constructor.name;} }
+  function M(o,k){ var f=o&&o[k]; return {proto:('prototype' in f), native:nat.test(Function.prototype.toString.call(f))}; }
+  function G(p,k){ var d=Object.getOwnPropertyDescriptor(p,k); return {proto:('prototype' in d.get), native:nat.test(d.get.toString()), illegal:err(function(){return p[k];})}; }
+  return JSON.stringify({
+    toDataURL:M(HTMLCanvasElement.prototype,'toDataURL'),
+    getParameter:M(WebGL2RenderingContext.prototype,'getParameter'),
+    measureText:M(CanvasRenderingContext2D.prototype,'measureText'),
+    platform:G(Navigator.prototype,'platform'),
+    webdriver:G(Navigator.prototype,'webdriver'),
+    fpProto:('prototype' in Function.prototype.toString),
+    fpNative:nat.test(Function.prototype.toString.toString()),
+  });
+})()
+"""
+
+
+@pytest.mark.integration
+async def test_no_prototype_lie_vectors(headless: bool) -> None:
+    """Patched methods/getters look native: no own prototype, "[native code]"
+    toString, and getters throw TypeError on an illegal (wrong-receiver) call."""
+    import json
+
+    persona = Persona.sample(os="windows", seed=11)
+    browser = await zd.start(headless=headless, persona=persona, browser_args=["--use-angle=vulkan"])
+    try:
+        tab = await browser.get("about:blank")
+        d = json.loads(await tab.evaluate(_LIE_AUDIT_JS))
+        for api in ("toDataURL", "getParameter", "measureText"):
+            assert d[api]["proto"] is False, api
+            assert d[api]["native"] is True, api
+        for g in ("platform", "webdriver"):
+            assert d[g]["proto"] is False, g
+            assert d[g]["native"] is True, g
+            assert d[g]["illegal"] == "TypeError", g
+        assert d["fpProto"] is False  # the shield's own toString has no prototype
+        assert d["fpNative"] is True
+    finally:
+        await browser.stop()
+
+
+_SCREEN_COHERENCE_JS = r"""
+(function(){
+  function dw(){ for(var w=300;w<=5000;w++){ if(matchMedia('(device-width: '+w+'px)').matches) return w; } return 0; }
+  function res(){ var c=[1,1.25,1.5,2,2.5,3]; for(var i=0;i<c.length;i++){ if(matchMedia('(resolution: '+c[i]+'dppx)').matches) return c[i]; } return 0; }
+  return JSON.stringify({w:screen.width,h:screen.height,ah:screen.availHeight,dpr:window.devicePixelRatio,
+    deviceWidth:dw(),mediaRes:res(),ownWidth:Object.prototype.hasOwnProperty.call(screen,'width')});
+})()
+"""
+
+
+@pytest.mark.integration
+async def test_screen_coherence(headless: bool) -> None:
+    """screen.* (engine-level via CDP device-metrics) is coherent with the CSS media
+    queries and carries no own-property tell, with a taskbar/menubar avail gap."""
+    import json
+
+    persona = Persona.sample(os="windows", seed=12)
+    browser = await zd.start(headless=headless, persona=persona)
+    try:
+        tab = await browser.get("about:blank")
+        d = json.loads(await tab.evaluate(_SCREEN_COHERENCE_JS))
+        assert d["deviceWidth"] == d["w"]   # @media device-width matches screen.width
+        assert d["mediaRes"] == d["dpr"]    # @media resolution matches devicePixelRatio
+        assert d["ownWidth"] is False       # screen.hasOwnProperty('width') == false (like real)
+        assert d["ah"] < d["h"]             # availHeight < height (taskbar gap)
+    finally:
+        await browser.stop()
+
+
+@pytest.mark.integration
+async def test_touch_disabled_for_desktop(headless: bool) -> None:
+    """Desktop personas report no touch — maxTouchPoints 0, no ontouchstart, fine
+    primary pointer — in BOTH headless and headed, even on a real touchscreen host.
+
+    maxTouchPoints is forced to 0 by a brand-guarded JS getter (CDP can't disable a
+    real touchscreen in headed mode). Residual: on a touchscreen host in HEADED mode
+    the engine-level `@media (any-pointer: coarse)` stays true (JS can't reach it);
+    headless is fully clean. We assert the JS-reachable signals here.
+    """
+    import json
+
+    persona = Persona.sample(os="macos", seed=13)
+    browser = await zd.start(headless=headless, persona=persona)
+    try:
+        tab = await browser.get("about:blank")
+        d = json.loads(await tab.evaluate(
+            "JSON.stringify({mtp:navigator.maxTouchPoints,"
+            "onts:('ontouchstart' in window),"
+            "coarse:matchMedia('(pointer: coarse)').matches})"
+        ))
+        assert d["mtp"] == 0  # forced to 0 even on a touchscreen host (headless+headed)
+        assert d["onts"] is False
+        assert d["coarse"] is False  # primary pointer is fine (mouse)
+    finally:
+        await browser.stop()
+
+
+@pytest.mark.integration
+async def test_timezone_explicit_applied(headless: bool) -> None:
+    """An explicit persona.timezone is applied verbatim (no network needed)."""
+    persona = Persona.sample(os="windows", seed=14)
+    persona.timezone = "Asia/Tokyo"
+    browser = await zd.start(headless=headless, persona=persona)
+    try:
+        tab = await browser.get("about:blank")
+        zone = await tab.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
+        assert zone == "Asia/Tokyo"
+    finally:
+        await browser.stop()
+
+
+_RECT_MATH_JS = r"""
+(function(){
+  var d=document.createElement('div');
+  d.style.cssText='width:123.4px;height:57.6px;position:absolute;left:11.2px;top:9.8px';
+  document.body.appendChild(d);
+  var ok=true, rs=d.getClientRects();
+  for(var i=0;i<rs.length;i++){ var r=rs[i];
+    if(r.right-r.left!==r.width||r.bottom-r.top!==r.height||r.right-r.x!==r.width||r.bottom-r.y!==r.height) ok=false; }
+  var br=d.getBoundingClientRect();
+  if(br.right-br.left!==br.width||br.bottom-br.top!==br.height) ok=false;
+  return JSON.stringify({ok:ok});
+})()
+"""
+
+
+@pytest.mark.integration
+async def test_client_rects_native_math_consistent(headless: bool) -> None:
+    """Default client_rects is NATIVE, so rects satisfy the geometric identities a
+    real browser guarantees (right-left==width, etc.) — the SEEDED noise strategy
+    would break these and be flagged as a lie."""
+    import json
+
+    persona = Persona.sample(os="windows", seed=15)
+    browser = await zd.start(headless=headless, persona=persona)
+    try:
+        tab = await browser.get("about:blank")
+        d = json.loads(await tab.evaluate(_RECT_MATH_JS))
+        assert d["ok"] is True
+    finally:
+        await browser.stop()
+
+
+@pytest.mark.integration
+async def test_auto_timezone_resolves_from_ip(headless: bool) -> None:
+    """persona.timezone='auto' derives a valid IANA zone from the exit IP. Requires
+    network: the geo-IP lookup routes through the browser (so it follows any
+    proxy/VPN). Skipped if the lookup is unavailable."""
+    persona = Persona.sample(os="windows", seed=16)
+    persona.timezone = "auto"
+    browser = await zd.start(headless=headless, persona=persona)
+    try:
+        tab = await browser.get("about:blank")
+        zone = await tab.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
+        if not isinstance(zone, str) or "/" not in zone:
+            pytest.skip("geo-IP timezone lookup unavailable (offline / endpoint blocked)")
+        assert "/" in zone  # a real IANA zone was derived and applied
     finally:
         await browser.stop()

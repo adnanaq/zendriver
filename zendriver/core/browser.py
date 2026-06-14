@@ -438,6 +438,7 @@ class Browser:
         await self.update_targets()
         self._build_fingerprint()
         await self._setup_worker_stealth()
+        await self._resolve_auto_timezone()
         return self
 
     async def _setup_worker_stealth(self) -> None:
@@ -496,6 +497,69 @@ class Browser:
             )
         except Exception:
             pass
+
+    async def _resolve_auto_timezone(self) -> None:
+        """Resolve ``persona.timezone == "auto"`` to the exit IP's IANA zone.
+
+        Timezone must match the connection's IP, not the OS — so "auto" looks up
+        the *exit* IP's zone (via an in-browser geo-IP request that routes through
+        any proxy/VPN) and applies it, keeping the zone coherent on any host/proxy.
+        On any failure it falls back to native passthrough (no override). No-op
+        unless the persona explicitly requested "auto".
+        """
+        profile = getattr(self, "_fingerprint", None)
+        persona = self.config.persona
+        if not persona or profile is None:
+            return
+        if str(getattr(persona, "timezone", "") or "").lower() != "auto":
+            return
+        zone = await self._lookup_exit_ip_timezone()
+        # Concrete IANA zone => connection._prepare_stealth applies it to new tabs;
+        # None => native passthrough (host zone). Apply now to the already-prepared
+        # main tab (its _prepare_stealth ran during startup with the "auto" sentinel).
+        profile.timezone = zone
+        if zone:
+            t = self.main_tab
+            if t is not None:
+                try:
+                    await t.send(cdp.emulation.set_timezone_override(zone))
+                except Exception:
+                    pass
+
+    async def _lookup_exit_ip_timezone(self) -> str | None:
+        """Return the exit IP's IANA timezone via an in-browser geo-IP lookup.
+
+        Navigates (so it uses the browser's network path => follows any proxy/VPN)
+        to geo-IP JSON endpoints in a fallback chain, parsing the ``timezone`` field
+        in-page (no CORS). Returns None if every endpoint fails.
+        """
+        t = self.main_tab
+        if t is None:
+            return None
+        endpoints = (
+            "https://get.geojs.io/v1/ip/geo.json",
+            "https://ipinfo.io/json",
+        )
+        parse = (
+            "(function(){try{var d=JSON.parse(document.body.innerText);"
+            "return (typeof d.timezone==='string')?d.timezone:null;}catch(e){return null;}})()"
+        )
+        zone: str | None = None
+        for url in endpoints:
+            try:
+                await t.get(url)
+                await t.wait(2)
+                cand = await t.evaluate(parse)
+                if isinstance(cand, str) and "/" in cand:
+                    zone = cand
+                    break
+            except Exception:
+                continue
+        try:
+            await t.get("about:blank")  # leave a clean tab for the caller
+        except Exception:
+            pass
+        return zone
 
     def _build_fingerprint(self) -> None:
         """Resolve a coherent ResolvedProfile from persona + live browser info; pin the seed."""

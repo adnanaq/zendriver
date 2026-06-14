@@ -729,15 +729,46 @@ class Connection(metaclass=CantTouchThis):
             )
         )
 
-        # Timezone: override only when impersonating a different OS or when the
-        # persona explicitly requests one — otherwise keep the host's real zone.
-        from .stealth import Persona as _Persona
+        # Timezone is a property of the user's LOCATION (exit IP), NOT their OS.
+        # Apply an override ONLY when the persona explicitly asked for one — never
+        # the OS archetype zone (profile.timezone defaults to the archetype, e.g.
+        # macOS -> America/Los_Angeles; applying that while the real exit IP is
+        # elsewhere is exactly the IP-vs-timezone mismatch pixelscan flags as
+        # "timezone spoofed"). So:
+        #   persona.timezone is None      -> no override, keep host zone (matches host IP)
+        #   persona.timezone == "<IANA>"  -> apply it (proxy users set the proxy region)
+        #   persona.timezone == "auto"    -> browser._resolve_auto_timezone() has already
+        #                                    replaced profile.timezone with the exit-IP zone
+        # The extra "/" check skips the unresolved "auto" sentinel / a failed lookup
+        # (profile.timezone left None) so neither sends an invalid override.
+        tz = profile.timezone
+        if persona.timezone and isinstance(tz, str) and "/" in tz:
+            try:
+                await self._send_oneshot(cdp.emulation.set_timezone_override(tz))
+            except Exception:
+                pass
 
-        cross_os = profile.navigator.platform != _Persona.system().platform
-        if (cross_os or persona.timezone) and profile.timezone:
+        # Screen metrics at the engine level (not JS): this drives screen.width/
+        # height, window.devicePixelRatio, AND the "device-width"/"device-height"/
+        # "resolution" CSS media queries together, so they stay mutually coherent —
+        # which a JS screen override cannot do (it leaves the media queries reading
+        # the real headless display, and leaves a hasOwnProperty(screen,'width')
+        # tampering tell). width=0/height=0 with dont_set_visible_size keeps the
+        # actual viewport untouched, so the page does NOT reflow. The availWidth/
+        # availHeight taskbar gap is layered on top in JS (on Screen.prototype).
+        scr = profile.screen
+        if scr is not None:
             try:
                 await self._send_oneshot(
-                    cdp.emulation.set_timezone_override(profile.timezone)
+                    cdp.emulation.set_device_metrics_override(
+                        width=0,
+                        height=0,
+                        device_scale_factor=float(scr.device_pixel_ratio),
+                        mobile=False,
+                        screen_width=scr.width,
+                        screen_height=scr.height,
+                        dont_set_visible_size=True,
+                    )
                 )
             except Exception:
                 pass

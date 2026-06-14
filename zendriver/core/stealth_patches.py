@@ -399,27 +399,36 @@ _NAVIGATOR_PROPS = """\
   if(_hw!==undefined&&_hw!==fp.cpuCount)_defProp('hardwareConcurrency',fp.cpuCount);
   if(_dm!==undefined&&typeof fp.deviceMemory==='number'&&_dm!==fp.deviceMemory)_defProp('deviceMemory',fp.deviceMemory);
   if(_nl!==undefined){const v=Array.from(_nl||[]);if(JSON.stringify(v)!==JSON.stringify(fp.languages))_defProp('languages',fp.languages);}
+  // maxTouchPoints: the curated archetypes are all desktop (non-touch => 0). On a
+  // touchscreen HOST in headed mode the real value (e.g. 10) leaks and CDP cannot
+  // disable it (setTouchEmulationEnabled only enables, with a count >= 1), so force
+  // it to 0 here. Only override when the host actually differs, so headless (already
+  // 0) gets no needless getter. (@media (any-pointer: coarse) stays engine-true on a
+  // touchscreen host in headed mode — a residual JS cannot reach; headless is clean.)
+  const _mtp=_nativeVal(Object.getOwnPropertyDescriptor(Navigator.prototype,'maxTouchPoints'));
+  if(_mtp!==undefined&&_mtp!==0)_defProp('maxTouchPoints',0);
 })();"""
 
 # userAgentData is intentionally not overridden — Chrome's real NavigatorUAData
 # object is already correct for the installed browser, and replacing it with a
 # plain JS object makes constructor/instanceof checks detectable.
 
-# Screen spoof via JS (NOT CDP setDeviceMetricsOverride, which reflows the page
-# layout — visibly moving elements even when the window isn't resized). Defining
-# screen.* properties has no layout effect. availHeight is kept < height so the
-# "no taskbar" headless tell (screen.height === availHeight) does not fire, and
-# the real window.innerWidth stays below screen.width so the "viewport == screen"
-# tell does not fire either. SCREEN_* tokens substituted with integers/float.
+# Screen availWidth/availHeight (the taskbar/menubar gap). screen.width/height,
+# devicePixelRatio, and the device-width/resolution media queries are set at the
+# engine level via CDP setDeviceMetricsOverride (see connection.py) — that path
+# does not reflow and leaves no own-property tell. CDP cannot express an avail gap
+# (it sets avail == screen), so availWidth/availHeight are layered here. They are
+# defined on Screen.prototype (NOT the screen instance) so screen.hasOwnProperty
+# stays false like a real browser, and the getter is brand-guarded against the
+# captured native getter so an illegal invocation throws the native TypeError.
+# SCREEN_AW / SCREEN_AH substituted with integers.
 _SCREEN = """\
 (function(){
-  function dp(k,v){try{Object.defineProperty(screen,k,{get:__zdGetter(k,function(){return v;}),configurable:true});}catch(e){}}
-  if(typeof screen!=='undefined'){
-    dp('width',SCREEN_W); dp('height',SCREEN_H);
-    dp('availWidth',SCREEN_AW); dp('availHeight',SCREEN_AH);
-    dp('colorDepth',SCREEN_CD); dp('pixelDepth',SCREEN_PD);
-  }
-  try{Object.defineProperty(window,'devicePixelRatio',{get:__zdGetter('devicePixelRatio',function(){return SCREEN_DPR;}),configurable:true});}catch(e){}
+  if(typeof Screen==='undefined') return;
+  var sp=Screen.prototype;
+  function dp(k,v){ try{ var ng=Object.getOwnPropertyDescriptor(sp,k); ng=ng&&ng.get; Object.defineProperty(sp,k,{get:__zdGetter(k,function(){ if(ng)ng.call(this); return v; }),configurable:true,enumerable:true}); }catch(e){} }
+  dp('availWidth',SCREEN_AW);
+  dp('availHeight',SCREEN_AH);
 })();"""
 
 # Fill in desktop-Chrome APIs that headless omits (CreepJS headless tells).
@@ -428,8 +437,12 @@ _SCREEN = """\
 # NOT added — desktop Chrome lacks it too; adding it would look mobile.)
 _HEADLESS_HINTS = """\
 (function(){
-  try{ if(!('share' in Navigator.prototype)) Navigator.prototype.share=__zdMethod('share',0,function(){return Promise.resolve();}); }catch(e){}
-  try{ if(!('canShare' in Navigator.prototype)) Navigator.prototype.canShare=__zdMethod('canShare',0,function(){return true;}); }catch(e){}
+  // share/canShare are added (absent in headless), so there is no native original
+  // to delegate the receiver brand-check to. A real navigator.share throws
+  // TypeError on an illegal invocation (wrong receiver); replicate that with an
+  // explicit instanceof check so the added methods match native behavior.
+  try{ if(!('share' in Navigator.prototype)) Navigator.prototype.share=__zdMethod('share',0,function(){if(!(this instanceof Navigator))throw new TypeError('Illegal invocation');return Promise.resolve();}); }catch(e){}
+  try{ if(!('canShare' in Navigator.prototype)) Navigator.prototype.canShare=__zdMethod('canShare',0,function(){if(!(this instanceof Navigator))throw new TypeError('Illegal invocation');return true;}); }catch(e){}
   try{
     if(navigator.connection){
       var cp=Object.getPrototypeOf(navigator.connection);
@@ -739,14 +752,8 @@ def bootstrap_script(profile: "ResolvedProfile") -> str:
     )
 
     scr = profile.screen
-    screen_js = (
-        _SCREEN.replace("SCREEN_W", str(scr.width))
-        .replace("SCREEN_H", str(scr.height))
-        .replace("SCREEN_AW", str(scr.avail_width))
-        .replace("SCREEN_AH", str(scr.avail_height))
-        .replace("SCREEN_CD", str(scr.color_depth))
-        .replace("SCREEN_PD", str(scr.pixel_depth))
-        .replace("SCREEN_DPR", repr(float(scr.device_pixel_ratio)))
+    screen_js = _SCREEN.replace("SCREEN_AW", str(scr.avail_width)).replace(
+        "SCREEN_AH", str(scr.avail_height)
     )
 
     parts = [

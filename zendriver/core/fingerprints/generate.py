@@ -107,5 +107,11 @@ def sample(
         timezone=arch.timezone,
         canvas=SurfaceCfg(),
         audio=SurfaceCfg(),
-        client_rects=SurfaceCfg(),
+        # Client rects default to NATIVE: any per-rect noise reconstructs DOMRects
+        # from floats, which breaks the exact arithmetic identities a real browser
+        # guarantees (right-left===width, etc.) and changes the fixed rotated-element
+        # hash — both of which fingerprinters flag as a lie. A real browser returns
+        # consistent rects, so NATIVE is the coherent (non-detectable) behavior; the
+        # font/canvas/audio surfaces still carry cross-session entropy.
+        client_rects=SurfaceCfg(strategy=Strategy.NATIVE),
     )
